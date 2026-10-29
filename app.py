@@ -79,12 +79,18 @@ with st.spinner("Generating users in SQL..."):
         st.stop()
 
 if raw_data:
-    parsed_data = [json.loads(row['generate_batch']) for row in raw_data]
+    # psycopg2 already turns json/jsonb into dicts; only parse if it came back as text
+    parsed_data = [
+        v if isinstance(v, dict) else json.loads(v)
+        for v in (next(iter(row.values())) for row in raw_data)
+    ]
     
     for row in parsed_data:
-        coords = row.pop('Coordinates')
-        row['Lat'] = round(coords['lat'], 4)
-        row['Lon'] = round(coords['lon'], 4)
+        coords = row.pop('Coordinates', None) or {}
+        if isinstance(coords, str):
+            coords = json.loads(coords)
+        row['Lat'] = round(float(coords['lat']), 4) if 'lat' in coords else None
+        row['Lon'] = round(float(coords['lon']), 4) if 'lon' in coords else None
 
     df = pd.DataFrame(parsed_data)
     st.dataframe(df, width="stretch", hide_index=True)
