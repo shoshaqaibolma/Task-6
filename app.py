@@ -27,18 +27,56 @@ with col4:
 
 st.info(f"Currently generating **Batch #{st.session_state.batch}**")
 
+def _mask_url(url: str) -> str:
+    # Hide the password but keep user/host/port/db visible for debugging
+    try:
+        from urllib.parse import urlsplit
+        u = urlsplit(url)
+        user = u.username or ""
+        host = u.hostname or ""
+        port = f":{u.port}" if u.port else ""
+        return f"{u.scheme}://{user}:****@{host}{port}{u.path}"
+    except Exception:
+        return "<could not parse DB_URL>"
+
+
 @st.cache_resource
 def init_connection():
-    db_url = st.secrets["postgres"]["DB_URL"]
-    return psycopg2.connect(db_url)
+    db_url = st.secrets["postgres"]["DB_URL"].strip()
+    kwargs = {"connect_timeout": 10}
+    if "sslmode=" not in db_url:
+        kwargs["sslmode"] = "require"  # cloud Postgres (Supabase, Neon, Render...) needs SSL
+    return psycopg2.connect(db_url, **kwargs)
 
-conn = init_connection()
+
+def get_connection():
+    try:
+        conn = init_connection()
+        if conn.closed:  # cached connection was dropped by the server
+            init_connection.clear()
+            conn = init_connection()
+        return conn
+    except psycopg2.OperationalError as e:
+        init_connection.clear()  # don't cache the failure
+        db_url = st.secrets["postgres"]["DB_URL"]
+        st.error("Could not connect to the database.")
+        st.code(f"DB_URL: {_mask_url(db_url)}\n\n{e}")
+        st.stop()
+
+
+conn = get_connection()
 
 with st.spinner("Generating users in SQL..."):
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM generate_batch(%s, %s, %s, 10)", (int(seed), st.session_state.batch, locale))
-    raw_data = cur.fetchall()
-    cur.close()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM generate_batch(%s, %s, %s, 10)", (int(seed), st.session_state.batch, locale))
+            raw_data = cur.fetchall()
+        conn.commit()
+    except psycopg2.Error as e:
+        conn.rollback()
+        st.error("SQL error while generating users:")
+        st.code(str(e))
+        st.stop()
 
 if raw_data:
     parsed_data = [json.loads(row['generate_batch']) for row in raw_data]
@@ -49,6 +87,6 @@ if raw_data:
         row['Lon'] = round(coords['lon'], 4)
 
     df = pd.DataFrame(parsed_data)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 else:
     st.error("No data returned. Check database connection.")
